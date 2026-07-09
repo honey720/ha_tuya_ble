@@ -295,6 +295,7 @@ class TuyaBLEDevice:
         self._input_buffer: bytearray | None = None
         self._input_expected_packet_num = 0
         self._input_expected_length = 0
+        self._input_missing_packet_count = 0
         self._input_expected_responses: dict[int,
                                              asyncio.Future[int] | None] = {}
         # self._input_future: asyncio.Future[int] | None = None
@@ -748,15 +749,18 @@ class TuyaBLEDevice:
                         self.rssi,
                         exc_info=True,
                     )
+                    await asyncio.sleep(min(1.0 + (100 - attempts_count) * 0.2, 5.0))
                     continue
                 except BLEAK_EXCEPTIONS:
                     _LOGGER.debug(
                         "%s: communication failed", self.address, exc_info=True
                     )
+                    await asyncio.sleep(min(1.0 + (100 - attempts_count) * 0.2, 5.0))
                     continue
                 except:
                     _LOGGER.debug("%s: unexpected error",
                                   self.address, exc_info=True)
+                    await asyncio.sleep(min(1.0 + (100 - attempts_count) * 0.2, 5.0))
                     continue
 
                 if client and client.is_connected:
@@ -773,6 +777,7 @@ class TuyaBLEDevice:
                                       self.address, exc_info=True)
                         continue
                 else:
+                    await asyncio.sleep(0.5)
                     continue
 
                 if self._client and self._client.is_connected:
@@ -1414,23 +1419,40 @@ class TuyaBLEDevice:
                 self._input_expected_packet_num,
             )
             self._clean_input()
+            return
+
+        if packet_num > self._input_expected_packet_num:
+            _LOGGER.error(
+                "%s: Unexpected packet (number %s) in notifications, expected %s (too high)",
+                self.address,
+                packet_num,
+                self._input_expected_packet_num,
+            )
+            self._input_missing_packet_count += 1
+            if self._input_missing_packet_count >= 3:
+                _LOGGER.error(
+                    "%s: Too many missing packet errors, forcing disconnect to recover",
+                    self.address,
+                )
+                self._input_missing_packet_count = 0
+                self._clean_input()
+                self._disconnect()
+                return
+            self._clean_input()
+            return
 
         if packet_num == self._input_expected_packet_num:
             if packet_num == 0:
                 self._input_buffer = bytearray()
                 self._input_expected_length, pos = self._unpack_int(data, pos)
                 pos += 1
-            self._input_buffer += data[pos:]
-            self._input_expected_packet_num += 1
-        else:
-            _LOGGER.error(
-                "%s: Missing packet (number %s) in notifications, received %s",
-                self.address,
-                self._input_expected_packet_num,
-                packet_num,
-            )
-            self._clean_input()
-            return
+                self._input_buffer += data[pos:]
+                self._input_expected_packet_num += 1
+                self._input_missing_packet_count = 0
+            else:
+                self._input_buffer += data[pos:]
+                self._input_expected_packet_num += 1
+                self._input_missing_packet_count = 0
 
         if len(self._input_buffer) > self._input_expected_length:
             _LOGGER.error(
