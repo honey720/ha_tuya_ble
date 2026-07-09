@@ -640,6 +640,7 @@ class TuyaBLEDevice:
                 self.address,
                 self.rssi,
             )
+            self._expected_disconnect = False
             self._fire_disconnected_callbacks()
             self._fire_connection_status_callbacks()
             return
@@ -712,12 +713,12 @@ class TuyaBLEDevice:
                 self.address,
                 self.rssi,
             )
-        if self._client and self._client.is_connected and self._is_paired:
+        if self._client and self._client.is_connected:
             return
         async with self._connect_lock:
             # Check again while holding the lock
             await asyncio.sleep(0.01)
-            if self._client and self._client.is_connected and self._is_paired:
+            if self._client and self._client.is_connected:
                 return
             attempts_count = 100
             while attempts_count > 0:
@@ -1404,11 +1405,13 @@ class TuyaBLEDevice:
 
     def _notification_handler(self, _sender: int, data: bytearray) -> None:
         """Handle notification responses."""
+        if data == getattr(self, "_last_notification_data", None):
+            _LOGGER.debug("%s: Duplicate packet ignored: %s", self.address, data.hex())
+            return
+        self._last_notification_data = data
         _LOGGER.debug("%s: Packet received: %s", self.address, data.hex())
-
         pos: int = 0
         packet_num: int
-
         packet_num, pos = self._unpack_int(data, pos)
 
         if packet_num < self._input_expected_packet_num:
