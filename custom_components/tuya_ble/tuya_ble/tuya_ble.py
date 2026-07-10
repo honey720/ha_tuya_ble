@@ -632,6 +632,8 @@ class TuyaBLEDevice:
 
     def _disconnected(self, client: BleakClientWithServiceCache) -> None:
         """Disconnected callback."""
+        asyncio.create_task(self._abandon_client(client))
+        
         was_paired = self._is_paired
         self._is_paired = False
         if self._expected_disconnect:
@@ -773,6 +775,7 @@ class TuyaBLEDevice:
                             CHARACTERISTIC_NOTIFY, self._notification_handler
                         )
                     except:  # [BLEAK_EXCEPTIONS, BleakNotFoundError]:
+                        await self._abandon_client(self._client)
                         self._client = None
                         _LOGGER.error("%s: starting notifications failed",
                                       self.address, exc_info=True)
@@ -791,6 +794,7 @@ class TuyaBLEDevice:
                             0,
                             True,
                         ):
+                            await self._abandon_client(self._client)
                             self._client = None
                             _LOGGER.error(
                                 "%s: Sending device info request failed",
@@ -798,6 +802,7 @@ class TuyaBLEDevice:
                             )
                             continue
                     except:  # [BLEAK_EXCEPTIONS, BleakNotFoundError]:
+                        await self._abandon_client(self._client)
                         self._client = None
                         _LOGGER.error("%s: Sending device info request failed",
                                       self.address, exc_info=True)
@@ -814,6 +819,7 @@ class TuyaBLEDevice:
                             0,
                             True,
                         ):
+                            await self._abandon_client(self._client)
                             self._client = None
                             _LOGGER.error(
                                 "%s: Sending pairing request failed",
@@ -821,6 +827,7 @@ class TuyaBLEDevice:
                             )
                             continue
                     except:  # [BLEAK_EXCEPTIONS, BleakNotFoundError]:
+                        await self._abandon_client(self._client)
                         self._client = None
                         _LOGGER.error("%s: Sending pairing request failed",
                                       self.address, exc_info=True)
@@ -1127,8 +1134,7 @@ class TuyaBLEDevice:
                         self.address,
                         exc_info=True,
                     )
-                    if self._client and self._client.is_connected:
-                        self._disconnected(self._client)
+                    asyncio.create_task(self._abandon_client(self._client))
                     raise BleakError()
             else:
                 _LOGGER.error(
@@ -1406,8 +1412,12 @@ class TuyaBLEDevice:
     def _notification_handler(self, _sender: int, data: bytearray) -> None:
         """Handle notification responses."""
         if data == getattr(self, "_last_notification_data", None):
-            _LOGGER.debug("%s: Duplicate packet ignored: %s", self.address, data.hex())
-            return
+            _LOGGER.warning(
+                "%s: Identical notification received twice in a row - "
+                "possible duplicate notify subscription: %s",
+                self.address,
+                data.hex(),
+            )
         self._last_notification_data = data
         _LOGGER.debug("%s: Packet received: %s", self.address, data.hex())
         pos: int = 0
@@ -1494,3 +1504,20 @@ class TuyaBLEDevice:
             await self._send_datapoints_v3(datapoint_ids)
         else:
             raise TuyaBLEDeviceError(0)
+    async def _abandon_client(self, client) -> None:
+        """Fully close a defunct client so its notify watchers are released."""
+        if not client:
+            return
+        try:
+            if client.is_connected:
+                try:
+                    await client.stop_notify(CHARACTERISTIC_NOTIFY)
+                except Exception:
+                    pass
+            # Call disconnect unconditionally: even on an already-dead link
+            # this forces bleak to tear down D-Bus watchers and callbacks.
+            await client.disconnect()
+        except Exception:
+            _LOGGER.debug(
+                "%s: error while abandoning client", self.address, exc_info=True
+            )
